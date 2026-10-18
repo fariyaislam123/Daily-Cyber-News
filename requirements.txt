@@ -1,0 +1,8 @@
+feedparser
+httpx
+beautifulsoup4
+google-genai
+fastapi
+uvicorn
+tzdata
+trafilatura
