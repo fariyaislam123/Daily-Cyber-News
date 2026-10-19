@@ -5,10 +5,14 @@ sources (including BGD e-GOV CIRT advisories) and summarizes each item with Gemi
 
 ## Setup
 python -m venv venv
+
 venv\Scripts\activate
+
 pip install -r requirements.txt
+
 setx GEMINI_API_KEY "your-key"   (then reopen the terminal)
 
 ## Run
 python run_all.py
+
 uvicorn main:app --reload
