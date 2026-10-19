@@ -24,7 +24,7 @@ SOURCES = [
 ]
 
 MAX_AGE_DAYS = 7          # ignore older articles
-MAX_NEW_PER_SOURCE = 15   # new articles to open per source per run
+MAX_NEW_PER_SOURCE = 15   # new articles to save per source per run
 COMMON_FEED_PATHS = ["/rss.xml", "/feed", "/feed/", "/rss", "/rss/", "/rss/feed"]
 TECH_TOKENS = {"tech", "technology", "science", "cyber", "digital", "ai", "startup", "ict"}
 
@@ -33,12 +33,13 @@ HEADERS = {
                   "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
 }
 
-# Keyword filter for general feeds (edit freely)
+# Only articles matching these keywords are kept (edit freely).
 KEYWORDS_CI = re.compile(
-    r"cyber\w*|hack\w*|ransomware|malware|phishing|data breach|data leak|"
-    r"data protection|artificial intelligence|machine learning|chatgpt|openai|"
+    r"cyber\w*|hack\w*|ransomware|malware|phishing|spyware|data breach|data leak|"
+    r"data protection|artificial intelligence|machine learning|chatbot|chatgpt|openai|"
     r"\btech\b|technolog\w*|software|startup|\bICT\b|fintech|btrc|telecom|"
-    r"internet|digital|semiconductor|smartphone|\b5G\b|online fraud|e-commerce",
+    r"internet|digital|semiconductor|smartphone|\b5G\b|online fraud|e-commerce|"
+    r"encryption|vulnerabilit\w*|data center|cloud computing|robot\w*",
     re.I,
 )
 KEYWORD_AI = re.compile(r"\bAI\b")  # case-sensitive so "said" doesn't match
@@ -73,7 +74,10 @@ def discover_feeds(home):
             if "rss" in t or "atom" in t:
                 candidates.append(urljoin(home, link.get("href", "")))
     except Exception as e:
-        print("  homepage fetch failed:", str(e)[:100])
+        msg = str(e)[:100]
+        if "403" in msg:
+            msg = "403 Forbidden (the site blocks scripts)"
+        print("  homepage fetch failed:", msg)
     candidates += [urljoin(home, p) for p in COMMON_FEED_PATHS]
 
     good = []
@@ -84,7 +88,12 @@ def discover_feeds(home):
                 good.append(url)
         except Exception:
             pass
-    return good, soup
+    # /feed and /feed/ are usually the same feed, so keep only one of them
+    unique = []
+    for u in good:
+        if u.rstrip("/") not in [x.rstrip("/") for x in unique]:
+            unique.append(u)
+    return unique, soup
 
 
 def collect_feed(conn, name, url):
@@ -151,8 +160,14 @@ def read_article(url):
     return text[:12000], published
 
 
+def mark_skipped(conn, url):
+    conn.execute("INSERT OR IGNORE INTO skipped (url) VALUES (?)", (url,))
+    conn.commit()
+
+
 def collect_section(conn, name, page, budget):
     new = 0
+    stats = {"old": 0, "short": 0, "off-topic": 0, "failed": 0}
     try:
         links = article_links(page)
     except Exception as e:
@@ -170,16 +185,26 @@ def collect_section(conn, name, page, budget):
         try:
             text, published = read_article(url)
         except Exception as e:
+            stats["failed"] += 1
             print("    failed:", url[-60:], str(e)[:60])
             continue
         time.sleep(1)  # be gentle with the site
-        if published < cutoff or len(text) < 200:
-            conn.execute("INSERT OR IGNORE INTO skipped (url) VALUES (?)", (url,))
-            conn.commit()
+        if published < cutoff:
+            stats["old"] += 1
+            mark_skipped(conn, url)
+            continue
+        if len(text) < 200:
+            stats["short"] += 1
+            mark_skipped(conn, url)
+            continue
+        if not relevant(title + " " + text[:1500]):
+            stats["off-topic"] += 1
+            mark_skipped(conn, url)
             continue
         new += save(conn, title, url, name, "Bangladesh", published.isoformat(), text)
         conn.commit()
         print("    +", title[:70])
+    print("    skipped:", ", ".join(f"{v} {k}" for k, v in stats.items() if v) or "none")
     return new
 
 
