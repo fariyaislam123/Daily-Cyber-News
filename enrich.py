@@ -1,7 +1,10 @@
+import ipaddress
 import json
 import re
+import socket
 import time
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlparse
 
 import httpx
 import trafilatura
@@ -19,6 +22,7 @@ current = 0
 
 BATCH_SIZE = 4          # articles per Gemini request
 MAX_DAYS = 3            # only enrich articles from the last N days (None = all)
+                        # BGD e-GOV CIRT advisories are always enriched, whatever their age
 LIMIT = None            # max articles per run (None = no limit)
 DELAY_SECONDS = 13      # free tier ~5 requests/minute; use 0 with billing
 MIN_TEXT_CHARS = 2000   # if saved text is shorter, fetch the full article
@@ -39,13 +43,33 @@ class DailyQuotaExhausted(Exception):
 
 
 # ---------- Getting the full article text ----------
+def is_public_url(url):
+    """True only for http(s) URLs whose host resolves to public IP addresses."""
+    try:
+        u = urlparse(url)
+        if u.scheme not in ("http", "https") or not u.hostname:
+            return False
+        infos = socket.getaddrinfo(u.hostname, None)
+    except (ValueError, socket.gaierror):
+        return False
+    return all(ipaddress.ip_address(i[4][0]).is_global for i in infos)
+
+
+def check_request(request):
+    """Runs before every request and every redirect: never fetch internal addresses."""
+    if not is_public_url(str(request.url)):
+        raise httpx.RequestError("blocked non-public address")
+
+
 def strip_html(text):
     return BeautifulSoup(text or "", "html.parser").get_text(" ", strip=True)
 
 
 def fetch_full_text(url):
     try:
-        r = httpx.get(url, headers=HEADERS, timeout=30, follow_redirects=True)
+        with httpx.Client(headers=HEADERS, timeout=30, follow_redirects=True,
+                          event_hooks={"request": [check_request]}) as c:
+            r = c.get(url)
         r.raise_for_status()
         text = trafilatura.extract(r.text, include_comments=False, include_tables=False)
         return (text or "")[:12000]
@@ -158,7 +182,7 @@ def enrich_batch(batch):
             continue
         if not 1 <= pos <= len(batch):
             continue
-        bullets = [str(b) for b in item.get("bullets", [])][:3]
+        bullets = [str(b)[:300] for b in item.get("bullets", [])][:3]
         if not bullets:
             continue
         category = item.get("category")
@@ -176,7 +200,7 @@ def enrich_all():
     params = []
     if MAX_DAYS:
         cutoff = (datetime.now(timezone.utc) - timedelta(days=MAX_DAYS)).isoformat()
-        sql += " AND published_at >= ?"
+        sql += " AND (published_at >= ? OR source = 'BGD e-GOV CIRT')"
         params.append(cutoff)
     sql += " ORDER BY published_at DESC"
     if LIMIT:
